@@ -66,7 +66,7 @@ import (
 
 const (
 	pluginID   = "cpa-resin-sticky-bind"
-	pluginVer  = "0.1.0"
+	pluginVer  = "0.1.1"
 	pluginAuth = "ArchmageTony"
 	pluginRepo = "https://github.com/ArchmageTony/cpa-resin-sticky-bind"
 	pluginLogo = ""
@@ -202,6 +202,10 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 	case pluginabi.MethodPluginShutdown:
 		getRuntime().Shutdown()
 		return okEnvelopeJSON("{}")
+	case pluginabi.MethodManagementRegister:
+		return okEnvelope(buildManagementRegistration())
+	case pluginabi.MethodManagementHandle:
+		return handleManagement(request)
 	default:
 		return errorEnvelope("unknown_method", "unknown method: "+method), nil
 	}
@@ -214,7 +218,8 @@ type registration struct {
 }
 
 type registrationCapabilities struct {
-	// no host capability flags required; binding runs via host callbacks + internal ticker
+	// CPA rejects plugins with zero capabilities.
+	ManagementAPI bool `json:"management_api"`
 }
 
 func pluginRegistration(request []byte) registration {
@@ -230,6 +235,8 @@ func pluginRegistration(request []byte) registration {
 			Logo:             pluginLogo,
 			ConfigFields:     configFields(),
 		},
-		Capabilities: registrationCapabilities{},
+		Capabilities: registrationCapabilities{
+			ManagementAPI: true,
+		},
 	}
 }

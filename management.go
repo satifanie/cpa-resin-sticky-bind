@@ -1,0 +1,167 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"html"
+	"net/http"
+	"net/url"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/ArchmageTony/cpa-resin-sticky-bind/internal/stickybind"
+)
+
+const (
+	resourcePath        = "/status"
+	resourceContentType = "text/html; charset=utf-8"
+)
+
+type managementRegistration struct {
+	Resources []managementResource `json:"resources,omitempty"`
+}
+
+type managementResource struct {
+	Path        string `json:"Path"`
+	Menu        string `json:"Menu"`
+	Description string `json:"Description"`
+}
+
+type managementRequest struct {
+	Method  string
+	Path    string
+	Headers http.Header
+	Query   url.Values
+	Body    []byte
+}
+
+type managementResponse struct {
+	StatusCode int         `json:"StatusCode"`
+	Headers    http.Header `json:"Headers"`
+	Body       []byte      `json:"Body"`
+}
+
+func buildManagementRegistration() managementRegistration {
+	return managementRegistration{
+		Resources: []managementResource{{
+			Path:        resourcePath,
+			Menu:        "Resin Sticky Bind",
+			Description: "Status and manual sync for per-auth Resin sticky proxy binding.",
+		}},
+	}
+}
+
+func handleManagement(raw []byte) ([]byte, error) {
+	var req managementRequest
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &req); err != nil {
+			return nil, fmt.Errorf("decode management request: %w", err)
+		}
+	}
+	path := strings.TrimSpace(req.Path)
+	if path == "" {
+		path = resourcePath
+	}
+	if path != resourcePath && path != "/" {
+		return okEnvelope(htmlResponse(http.StatusNotFound, "<html><body>not found</body></html>"))
+	}
+
+	cfg := getRuntime().Config()
+	action := ""
+	if req.Query != nil {
+		action = strings.ToLower(strings.TrimSpace(req.Query.Get("action")))
+	}
+	var syncNote string
+	if action == "sync" {
+		wrote, skipped, unchanged, failed, err := runManualSync(cfg)
+		if err != nil {
+			syncNote = "sync error: " + err.Error()
+		} else {
+			syncNote = fmt.Sprintf("sync done wrote=%d skipped=%d unchanged=%d failed=%d", wrote, skipped, unchanged, failed)
+		}
+	}
+
+	page := renderStatusPage(cfg, syncNote)
+	return okEnvelope(htmlResponse(http.StatusOK, page))
+}
+
+func runManualSync(cfg stickybind.Config) (wrote, skipped, unchanged, failed int, err error) {
+	b := &stickybind.Binder{
+		Cfg:    cfg,
+		Host:   hostAdapter{},
+		Getenv: os.Getenv,
+	}
+	return b.SyncOnce()
+}
+
+func htmlResponse(status int, body string) managementResponse {
+	headers := make(http.Header)
+	headers.Set("Content-Type", resourceContentType)
+	return managementResponse{
+		StatusCode: status,
+		Headers:    headers,
+		Body:       []byte(body),
+	}
+}
+
+func renderStatusPage(cfg stickybind.Config, syncNote string) string {
+	cfg = cfg.Normalize()
+	tokenStatus := "missing"
+	if _, err := stickybind.ParseResinProxyURL(cfg.ResinProxyURL, cfg.ProxyTokenEnv, os.Getenv); err == nil {
+		tokenStatus = "ok"
+	} else {
+		tokenStatus = "error: " + err.Error()
+	}
+	// never echo raw token/url password
+	safeURL := stickybind.RedactProxyURL(cfg.ResinProxyURL)
+	if safeURL == "" {
+		safeURL = cfg.ResinProxyURL
+	}
+	// if URL has only username token, redact whole userinfo
+	if u, err := url.Parse(cfg.ResinProxyURL); err == nil && u.User != nil {
+		if _, hasPass := u.User.Password(); !hasPass && u.User.Username() != "" {
+			safeURL = u.Scheme + "://***@" + u.Host
+		}
+	}
+
+	var b strings.Builder
+	b.WriteString("<!doctype html><html><head><meta charset=\"utf-8\"><title>Resin Sticky Bind</title>")
+	b.WriteString("<style>body{font-family:system-ui,sans-serif;margin:24px;max-width:900px}code,pre{background:#f4f4f5;padding:2px 6px;border-radius:4px}table{border-collapse:collapse;width:100%}td,th{border:1px solid #ddd;padding:8px;text-align:left}.ok{color:#067d3e}.bad{color:#b00020}.note{margin:12px 0;padding:10px;background:#eef6ff;border-radius:6px}</style>")
+	b.WriteString("</head><body>")
+	b.WriteString("<h1>Resin Sticky Bind</h1>")
+	b.WriteString("<p>Binds empty credential <code>proxy_url</code> values to stable Resin sticky accounts.</p>")
+	if syncNote != "" {
+		b.WriteString("<div class=\"note\">")
+		b.WriteString(html.EscapeString(syncNote))
+		b.WriteString("</div>")
+	}
+	b.WriteString("<p><a href=\"?action=sync\">Run sync now</a></p>")
+	b.WriteString("<h2>Status</h2><table>")
+	row(&b, "plugin", pluginID+" v"+pluginVer)
+	row(&b, "enabled", fmt.Sprintf("%v", cfg.Enabled))
+	row(&b, "resin_proxy_url", safeURL)
+	row(&b, "proxy_token_env", cfg.ProxyTokenEnv)
+	row(&b, "token_resolve", tokenStatus)
+	row(&b, "default_platform", cfg.DefaultPlatform)
+	row(&b, "account_strategy", cfg.AccountStrategy)
+	row(&b, "sync_interval_seconds", fmt.Sprintf("%d", cfg.SyncIntervalSeconds))
+	row(&b, "only_if_empty", fmt.Sprintf("%v", cfg.OnlyIfEmpty))
+	row(&b, "overwrite_existing", fmt.Sprintf("%v", cfg.OverwriteExisting))
+	row(&b, "time", time.Now().Format(time.RFC3339))
+	b.WriteString("</table>")
+	b.WriteString("<h2>Notes</h2><ul>")
+	b.WriteString("<li>No Management API URL is required; host.auth callbacks run in-process.</li>")
+	b.WriteString("<li>Token may come from env, URL password, or URL username-only form.</li>")
+	b.WriteString("<li>Existing non-empty proxy_url is skipped when only_if_empty=true.</li>")
+	b.WriteString("</ul></body></html>")
+	return b.String()
+}
+
+func row(b *strings.Builder, k, v string) {
+	b.WriteString("<tr><th>")
+	b.WriteString(html.EscapeString(k))
+	b.WriteString("</th><td>")
+	b.WriteString(html.EscapeString(v))
+	b.WriteString("</td></tr>")
+}

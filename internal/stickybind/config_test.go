@@ -44,6 +44,23 @@ func TestParseResinProxyURLPasswordInURL(t *testing.T) {
 	}
 }
 
+func TestParseResinProxyURLTokenAsUsername(t *testing.T) {
+	proxy, err := ParseResinProxyURL("socks5h://onlytoken@resin:2260", "RESIN_PROXY_TOKEN", func(string) string { return "" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proxy.Password != "onlytoken" {
+		t.Fatalf("password = %q", proxy.Password)
+	}
+	url, err := BuildProxyURL(proxy, "default", "acc1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if url != "socks5h://default.acc1:onlytoken@resin:2260" {
+		t.Fatalf("url = %q", url)
+	}
+}
+
 func TestParseConfigFromYAML(t *testing.T) {
 	req, _ := json.Marshal(map[string]any{
 		"config_yaml": "enabled: true\nresin_proxy_url: socks5h://resin:2260\ndefault_platform: pool-a\nonly_if_empty: true\n",
@@ -55,12 +72,10 @@ func TestParseConfigFromYAML(t *testing.T) {
 }
 
 func contains(s, sub string) bool {
-	return len(s) >= len(sub) && (s == sub || len(sub) == 0 || (len(s) > 0 && (func() bool {
-		for i := 0; i+len(sub) <= len(s); i++ {
-			if s[i:i+len(sub)] == sub {
-				return true
-			}
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
 		}
-		return false
-	})()))
+	}
+	return sub == ""
 }

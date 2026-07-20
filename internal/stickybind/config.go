@@ -141,6 +141,10 @@ func ParseResinProxyURL(raw string, tokenEnv string, getenv func(string) string)
 		if p, ok := u.User.Password(); ok {
 			password = p
 		}
+		// Accept socks5h://<token>@host:port (token placed in username, no password).
+		if strings.TrimSpace(password) == "" {
+			password = strings.TrimSpace(u.User.Username())
+		}
 	}
 	if strings.TrimSpace(password) == "" {
 		envName := strings.TrimSpace(tokenEnv)

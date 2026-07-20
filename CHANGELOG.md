@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.1
+
+- 修复: CPA 要求至少一种 capability, 注册空 capabilities 导致 `invalid metadata or no capabilities`
+- 声明 `management_api` 并提供状态页 / 手动 sync
+- 支持 `socks5h://<token>@host:port` (token 写在 username)
+
 ## 0.1.0
 
 - 首个可用版本
