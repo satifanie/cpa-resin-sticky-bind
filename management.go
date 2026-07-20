@@ -19,13 +19,22 @@ const (
 )
 
 type managementRegistration struct {
+	Routes    []managementRoute    `json:"routes,omitempty"`
 	Resources []managementResource `json:"resources,omitempty"`
 }
 
+// Use exported field names (no custom json tags) so CPA host decoding matches pluginapi.ResourceRoute.
 type managementResource struct {
-	Path        string `json:"Path"`
-	Menu        string `json:"Menu"`
-	Description string `json:"Description"`
+	Path        string
+	Menu        string
+	Description string
+}
+
+type managementRoute struct {
+	Method      string
+	Path        string
+	Menu        string
+	Description string
 }
 
 type managementRequest struct {
@@ -37,14 +46,22 @@ type managementRequest struct {
 }
 
 type managementResponse struct {
-	StatusCode int         `json:"StatusCode"`
-	Headers    http.Header `json:"Headers"`
-	Body       []byte      `json:"Body"`
+	StatusCode int
+	Headers    http.Header
+	Body       []byte
 }
 
 func buildManagementRegistration() managementRegistration {
 	return managementRegistration{
+		// Browser resource under /v0/resource/plugins/<pluginID>/status
 		Resources: []managementResource{{
+			Path:        resourcePath,
+			Menu:        "Resin Sticky Bind",
+			Description: "Status and manual sync for per-auth Resin sticky proxy binding.",
+		}},
+		// Legacy GET+Menu also maps into resource routes on some CPA builds.
+		Routes: []managementRoute{{
+			Method:      http.MethodGet,
 			Path:        resourcePath,
 			Menu:        "Resin Sticky Bind",
 			Description: "Status and manual sync for per-auth Resin sticky proxy binding.",
@@ -59,11 +76,8 @@ func handleManagement(raw []byte) ([]byte, error) {
 			return nil, fmt.Errorf("decode management request: %w", err)
 		}
 	}
-	path := strings.TrimSpace(req.Path)
-	if path == "" {
-		path = resourcePath
-	}
-	if path != resourcePath && path != "/" {
+	// Host passes the full request path, e.g. /v0/resource/plugins/cpa-resin-sticky-bind/status
+	if !isStatusResourcePath(req.Path) {
 		return okEnvelope(htmlResponse(http.StatusNotFound, "<html><body>not found</body></html>"))
 	}
 
@@ -84,6 +98,15 @@ func handleManagement(raw []byte) ([]byte, error) {
 
 	page := renderStatusPage(cfg, syncNote)
 	return okEnvelope(htmlResponse(http.StatusOK, page))
+}
+
+func isStatusResourcePath(path string) bool {
+	path = strings.TrimSpace(path)
+	if path == "" || path == "/" || path == resourcePath {
+		return true
+	}
+	path = strings.TrimRight(path, "/")
+	return strings.HasSuffix(path, resourcePath) || strings.HasSuffix(path, "/status")
 }
 
 func runManualSync(cfg stickybind.Config) (wrote, skipped, unchanged, failed int, err error) {

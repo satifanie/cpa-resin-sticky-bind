@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.2
+
+- 修复状态页 404: 接受 host 传入的完整 resource 路径
+- 同时注册 Resources 与 legacy GET+Menu 路由
+
 ## 0.1.1
 
 - 修复: CPA 要求至少一种 capability, 注册空 capabilities 导致 `invalid metadata or no capabilities`
