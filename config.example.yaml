@@ -1,0 +1,23 @@
+plugins:
+  enabled: true
+  dir: "plugins"
+  store-sources:
+    - "https://raw.githubusercontent.com/ArchmageTony/cpa-resin-sticky-bind/main/registry.json"
+  configs:
+    cpa-resin-sticky-bind:
+      enabled: true
+      # Full Resin proxy entry. For app_net internal DNS:
+      resin_proxy_url: "socks5h://resin:2260"
+      # Token is read from this env var when URL has no password.
+      # Inject RESIN_PROXY_TOKEN into the CPA container; do not commit real tokens.
+      proxy_token_env: "RESIN_PROXY_TOKEN"
+      default_platform: "default"
+      platform_by_provider: {}
+      platform_by_auth_id: {}
+      account_strategy: "auth_id"
+      account_prefix: ""
+      sync_interval_seconds: 30
+      only_if_empty: true
+      overwrite_existing: false
+      include_providers: []
+      exclude_providers: []

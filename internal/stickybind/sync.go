@@ -1,0 +1,279 @@
+package stickybind
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/url"
+	"path/filepath"
+	"strings"
+)
+
+// HostAuthEntry is one credential from host.auth.list.
+type HostAuthEntry struct {
+	ID          string `json:"id,omitempty"`
+	AuthIndex   string `json:"auth_index,omitempty"`
+	Name        string `json:"name"`
+	Type        string `json:"type,omitempty"`
+	Provider    string `json:"provider,omitempty"`
+	Label       string `json:"label,omitempty"`
+	Status      string `json:"status,omitempty"`
+	Disabled    bool   `json:"disabled,omitempty"`
+	Unavailable bool   `json:"unavailable,omitempty"`
+	RuntimeOnly bool   `json:"runtime_only,omitempty"`
+	Source      string `json:"source,omitempty"`
+	Path        string `json:"path,omitempty"`
+	Email       string `json:"email,omitempty"`
+}
+
+// AuthGetResult is host.auth.get payload.
+type AuthGetResult struct {
+	AuthIndex string          `json:"auth_index"`
+	Name      string          `json:"name,omitempty"`
+	Path      string          `json:"path,omitempty"`
+	JSON      json.RawMessage `json:"json"`
+}
+
+// Action describes one sync decision.
+type Action string
+
+const (
+	ActionSkip     Action = "skip"
+	ActionWrite    Action = "write"
+	ActionUnchanged Action = "unchanged"
+)
+
+// Decision is the result of evaluating one credential.
+type Decision struct {
+	Action     Action
+	Reason     string
+	AuthIndex  string
+	Name       string
+	Provider   string
+	Platform   string
+	Account    string
+	ProxyURL   string
+	SaveName   string
+	SaveJSON   json.RawMessage
+	Redacted   string
+}
+
+// HostAPI is the minimal host surface used by the binder.
+type HostAPI interface {
+	ListAuths() ([]HostAuthEntry, error)
+	GetAuth(authIndex string) (AuthGetResult, error)
+	SaveAuth(name string, rawJSON json.RawMessage) error
+	Log(level, message string)
+}
+
+// Binder performs credential proxy binding.
+type Binder struct {
+	Cfg    Config
+	Host   HostAPI
+	Getenv func(string) string
+}
+
+// SyncOnce enumerates credentials and binds empty proxy_url fields.
+func (b *Binder) SyncOnce() (wrote, skipped, unchanged, failed int, err error) {
+	if b == nil || b.Host == nil {
+		return 0, 0, 0, 0, fmt.Errorf("binder host is nil")
+	}
+	cfg := b.Cfg.Normalize()
+	if !cfg.Enabled {
+		b.Host.Log("info", "sticky-bind disabled; skip sync")
+		return 0, 0, 0, 0, nil
+	}
+	proxy, errProxy := ParseResinProxyURL(cfg.ResinProxyURL, cfg.ProxyTokenEnv, b.Getenv)
+	if errProxy != nil {
+		return 0, 0, 0, 0, errProxy
+	}
+
+	entries, errList := b.Host.ListAuths()
+	if errList != nil {
+		return 0, 0, 0, 0, errList
+	}
+	for _, entry := range entries {
+		dec, errDecide := b.decide(cfg, proxy, entry)
+		if errDecide != nil {
+			failed++
+			b.Host.Log("error", fmt.Sprintf("decide failed name=%s auth_index=%s err=%v", entry.Name, entry.AuthIndex, errDecide))
+			continue
+		}
+		switch dec.Action {
+		case ActionSkip:
+			skipped++
+			b.Host.Log("info", fmt.Sprintf("skip name=%s auth_index=%s reason=%s", dec.Name, dec.AuthIndex, dec.Reason))
+		case ActionUnchanged:
+			unchanged++
+			b.Host.Log("info", fmt.Sprintf("unchanged name=%s auth_index=%s platform=%s account=%s proxy=%s", dec.Name, dec.AuthIndex, dec.Platform, dec.Account, dec.Redacted))
+		case ActionWrite:
+			if errSave := b.Host.SaveAuth(dec.SaveName, dec.SaveJSON); errSave != nil {
+				failed++
+				b.Host.Log("error", fmt.Sprintf("save failed name=%s auth_index=%s err=%v", dec.Name, dec.AuthIndex, errSave))
+				continue
+			}
+			wrote++
+			b.Host.Log("info", fmt.Sprintf("bound name=%s auth_index=%s platform=%s account=%s proxy=%s", dec.Name, dec.AuthIndex, dec.Platform, dec.Account, dec.Redacted))
+		}
+	}
+	return wrote, skipped, unchanged, failed, nil
+}
+
+func (b *Binder) decide(cfg Config, proxy ParsedProxy, entry HostAuthEntry) (Decision, error) {
+	dec := Decision{
+		AuthIndex: strings.TrimSpace(entry.AuthIndex),
+		Name:      strings.TrimSpace(entry.Name),
+		Provider:  firstNonEmpty(entry.Provider, entry.Type),
+	}
+	if dec.AuthIndex == "" {
+		return Decision{Action: ActionSkip, Reason: "missing_auth_index", Name: dec.Name}, nil
+	}
+	if entry.RuntimeOnly {
+		return Decision{Action: ActionSkip, Reason: "runtime_only", AuthIndex: dec.AuthIndex, Name: dec.Name, Provider: dec.Provider}, nil
+	}
+	if entry.Disabled || strings.EqualFold(entry.Status, "disabled") {
+		return Decision{Action: ActionSkip, Reason: "disabled", AuthIndex: dec.AuthIndex, Name: dec.Name, Provider: dec.Provider}, nil
+	}
+	if !ProviderAllowed(cfg, dec.Provider) {
+		return Decision{Action: ActionSkip, Reason: "provider_filtered", AuthIndex: dec.AuthIndex, Name: dec.Name, Provider: dec.Provider}, nil
+	}
+
+	got, errGet := b.Host.GetAuth(dec.AuthIndex)
+	if errGet != nil {
+		return Decision{}, errGet
+	}
+	saveName := firstNonEmpty(strings.TrimSpace(got.Name), dec.Name)
+	if saveName == "" {
+		return Decision{Action: ActionSkip, Reason: "missing_filename", AuthIndex: dec.AuthIndex, Name: dec.Name, Provider: dec.Provider}, nil
+	}
+	if !strings.HasSuffix(strings.ToLower(saveName), ".json") {
+		saveName = saveName + ".json"
+	}
+	saveName = filepath.Base(saveName)
+
+	meta, existingProxy, errMeta := parseAuthJSON(got.JSON)
+	if errMeta != nil {
+		return Decision{}, errMeta
+	}
+	if existingProxy != "" && cfg.OnlyIfEmpty && !cfg.OverwriteExisting {
+		platform, account, _ := ExtractAccountFromProxyURL(existingProxy)
+		return Decision{
+			Action:    ActionSkip,
+			Reason:    "proxy_url_present",
+			AuthIndex: dec.AuthIndex,
+			Name:      saveName,
+			Provider:  dec.Provider,
+			Platform:  platform,
+			Account:   account,
+			ProxyURL:  existingProxy,
+			Redacted:  RedactProxyURL(existingProxy),
+		}, nil
+	}
+
+	authID := firstNonEmpty(entry.ID, metaString(meta, "id"), saveName)
+	email := firstNonEmpty(entry.Email, metaString(meta, "email"))
+	sub := metaString(meta, "sub")
+	accountIn := AccountInput{
+		AuthID:   authID,
+		Email:    email,
+		Sub:      sub,
+		Filename: saveName,
+		Provider: dec.Provider,
+	}
+	platform := ResolvePlatform(cfg, authID, dec.Provider)
+	if platform == "" {
+		return Decision{Action: ActionSkip, Reason: "platform_empty", AuthIndex: dec.AuthIndex, Name: saveName, Provider: dec.Provider}, nil
+	}
+	account := BuildAccount(cfg, accountIn)
+	proxyURL, errBuild := BuildProxyURL(proxy, platform, account)
+	if errBuild != nil {
+		return Decision{}, errBuild
+	}
+	if existingProxy != "" && sameProxyURL(existingProxy, proxyURL) {
+		return Decision{
+			Action:    ActionUnchanged,
+			Reason:    "already_bound",
+			AuthIndex: dec.AuthIndex,
+			Name:      saveName,
+			Provider:  dec.Provider,
+			Platform:  platform,
+			Account:   account,
+			ProxyURL:  existingProxy,
+			Redacted:  RedactProxyURL(existingProxy),
+		}, nil
+	}
+
+	meta["proxy_url"] = proxyURL
+	raw, errMarshal := json.Marshal(meta)
+	if errMarshal != nil {
+		return Decision{}, errMarshal
+	}
+	return Decision{
+		Action:    ActionWrite,
+		Reason:    "bind",
+		AuthIndex: dec.AuthIndex,
+		Name:      saveName,
+		Provider:  dec.Provider,
+		Platform:  platform,
+		Account:   account,
+		ProxyURL:  proxyURL,
+		SaveName:  saveName,
+		SaveJSON:  raw,
+		Redacted:  RedactProxyURL(proxyURL),
+	}, nil
+}
+
+func parseAuthJSON(raw json.RawMessage) (map[string]any, string, error) {
+	if len(bytesTrimSpace(raw)) == 0 {
+		return nil, "", fmt.Errorf("auth json is empty")
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		return nil, "", fmt.Errorf("invalid auth json: %w", err)
+	}
+	if meta == nil {
+		meta = map[string]any{}
+	}
+	proxy := strings.TrimSpace(metaString(meta, "proxy_url"))
+	return meta, proxy, nil
+}
+
+func metaString(meta map[string]any, key string) string {
+	if meta == nil {
+		return ""
+	}
+	if v, ok := meta[key]; ok {
+		return StringFromAny(v)
+	}
+	return ""
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if s := strings.TrimSpace(v); s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+func bytesTrimSpace(raw []byte) []byte {
+	return []byte(strings.TrimSpace(string(raw)))
+}
+
+func sameProxyURL(a, b string) bool {
+	return normalizeProxyCompare(a) == normalizeProxyCompare(b)
+}
+
+func normalizeProxyCompare(raw string) string {
+	raw = strings.TrimSpace(raw)
+	u, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	// compare full string with password included; equality is exact after trim
+	return u.String()
+}
+
+func parseLooseURL(raw string) (*url.URL, error) {
+	return url.Parse(strings.TrimSpace(raw))
+}

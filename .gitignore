@@ -1,0 +1,32 @@
+# build
+bin/
+dist/
+*.so
+*.dll
+*.dylib
+*.h
+*.a
+
+# local SDK checkout used by CI/dev
+CLIProxyAPI-src/
+CLIProxyAPI-src
+
+# go
+vendor/
+
+# editor / os
+.idea/
+.vscode/
+.DS_Store
+*.swp
+*.log
+
+# secrets
+.env
+*.pem
+*.key
+
+# private / local markdown (keep public docs only)
+*.md
+!README.md
+!CHANGELOG.md
