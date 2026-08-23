@@ -168,9 +168,11 @@ type authContext struct {
 	ExistingProxy string
 }
 
-// prepare 执行 sync 与 reset 共用的过滤和解析。
+// prepare 执行 sync 与 reset 共用的解析。
+// 只做两边都必须跳过的硬性过滤（缺 auth_index、runtime_only、缺文件名）；
+// disabled 与 provider 过滤属于 sync 策略，见 syncFilter。
 // 返回的 skip 非 nil 时表示该 credential 应直接跳过。
-func (b *Binder) prepare(cfg Config, entry HostAuthEntry) (authContext, *Decision, error) {
+func (b *Binder) prepare(entry HostAuthEntry) (authContext, *Decision, error) {
 	ctx := authContext{
 		AuthIndex: strings.TrimSpace(entry.AuthIndex),
 		Name:      strings.TrimSpace(entry.Name),
@@ -181,12 +183,6 @@ func (b *Binder) prepare(cfg Config, entry HostAuthEntry) (authContext, *Decisio
 	}
 	if entry.RuntimeOnly {
 		return ctx, &Decision{Action: ActionSkip, Reason: "runtime_only", AuthIndex: ctx.AuthIndex, Name: ctx.Name, Provider: ctx.Provider}, nil
-	}
-	if entry.Disabled || strings.EqualFold(entry.Status, "disabled") {
-		return ctx, &Decision{Action: ActionSkip, Reason: "disabled", AuthIndex: ctx.AuthIndex, Name: ctx.Name, Provider: ctx.Provider}, nil
-	}
-	if !ProviderAllowed(cfg, ctx.Provider) {
-		return ctx, &Decision{Action: ActionSkip, Reason: "provider_filtered", AuthIndex: ctx.AuthIndex, Name: ctx.Name, Provider: ctx.Provider}, nil
 	}
 
 	got, errGet := b.Host.GetAuth(ctx.AuthIndex)
@@ -209,6 +205,23 @@ func (b *Binder) prepare(cfg Config, entry HostAuthEntry) (authContext, *Decisio
 	ctx.Meta = meta
 	ctx.ExistingProxy = existingProxy
 	return ctx, nil, nil
+}
+
+// syncFilter 返回非 nil 表示该 credential 不参与 sync。
+// reset 刻意不套用这些过滤：禁用的凭据、以及配置改动后落在 provider
+// 过滤之外的凭据，同样需要清理插件此前写入的残留绑定。
+// 放在 GetAuth 之前判定，让 sync 保持早退、不做多余的 host 往返。
+func syncFilter(cfg Config, entry HostAuthEntry) *Decision {
+	authIndex := strings.TrimSpace(entry.AuthIndex)
+	name := strings.TrimSpace(entry.Name)
+	provider := firstNonEmpty(entry.Provider, entry.Type)
+	if entry.Disabled || strings.EqualFold(entry.Status, "disabled") {
+		return &Decision{Action: ActionSkip, Reason: "disabled", AuthIndex: authIndex, Name: name, Provider: provider}
+	}
+	if !ProviderAllowed(cfg, provider) {
+		return &Decision{Action: ActionSkip, Reason: "provider_filtered", AuthIndex: authIndex, Name: name, Provider: provider}
+	}
+	return nil
 }
 
 // resolveTarget 按当前配置推导该 credential 应有的 Platform/Account/proxy_url。
@@ -234,7 +247,10 @@ func resolveTarget(cfg Config, proxy ParsedProxy, entry HostAuthEntry, ctx authC
 }
 
 func (b *Binder) decide(cfg Config, proxy ParsedProxy, entry HostAuthEntry) (Decision, error) {
-	ctx, skip, errPrepare := b.prepare(cfg, entry)
+	if skip := syncFilter(cfg, entry); skip != nil {
+		return *skip, nil
+	}
+	ctx, skip, errPrepare := b.prepare(entry)
 	if errPrepare != nil {
 		return Decision{}, errPrepare
 	}
@@ -299,7 +315,7 @@ func (b *Binder) decide(cfg Config, proxy ParsedProxy, entry HostAuthEntry) (Dec
 
 // decideReset 判断一条 credential 的 proxy_url 是否由本插件生成，是则置空。
 func (b *Binder) decideReset(cfg Config, proxy ParsedProxy, entry HostAuthEntry) (Decision, error) {
-	ctx, skip, errPrepare := b.prepare(cfg, entry)
+	ctx, skip, errPrepare := b.prepare(entry)
 	if errPrepare != nil {
 		return Decision{}, errPrepare
 	}

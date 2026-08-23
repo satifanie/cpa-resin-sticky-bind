@@ -53,10 +53,13 @@ func (hostAdapter) Log(level, message string) {
 }
 
 type runtime struct {
-	mu     sync.Mutex
-	cfg    stickybind.Config
-	stopCh chan struct{}
-	doneCh chan struct{}
+	mu sync.Mutex
+	// cfg 是 host 最近一次下发的配置，不受 reset 影响。
+	cfg stickybind.Config
+	// resetHalt 是 reset 闩锁：置位后强制停用，直到 Resume 或进程重启。
+	resetHalt bool
+	stopCh    chan struct{}
+	doneCh    chan struct{}
 }
 
 var (
@@ -83,18 +86,46 @@ func (r *runtime) ApplyConfig(cfg stickybind.Config) {
 func (r *runtime) Config() stickybind.Config {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.cfg
+	return r.effectiveLocked()
 }
 
-// Disable 关闭 enabled 并停止同步循环，返回更新后的配置。
-// 仅作用于进程内状态：host 未提供写回插件配置的回调，
-// 下次 plugin.reconfigure 会按配置文件恢复 enabled。
-func (r *runtime) Disable() stickybind.Config {
+// State 返回生效配置与 reset 闩锁状态。
+func (r *runtime) State() (stickybind.Config, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.cfg.Enabled = false
+	return r.effectiveLocked(), r.resetHalt
+}
+
+// effectiveLocked 把 reset 闩锁叠加到 host 下发的配置上。
+// 闩锁只影响 Enabled，其余字段仍取自配置，保证 Resume 后能恢复原值。
+func (r *runtime) effectiveLocked() stickybind.Config {
+	cfg := r.cfg
+	if r.resetHalt {
+		cfg.Enabled = false
+	}
+	return cfg
+}
+
+// HaltForReset 置位 reset 闩锁并停止同步循环，返回停用后的配置。
+//
+// 必须用闩锁而非直接改 cfg.Enabled：reset 写 auth 文件会触发 host 的 auth watcher，
+// 后者走 syncPluginRuntime -> plugin.reconfigure 重新下发配置文件里的 enabled=true，
+// 循环随即重启并把刚清空的 proxy_url 全部写回。
+func (r *runtime) HaltForReset() stickybind.Config {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.resetHalt = true
 	r.restartLocked()
-	return r.cfg
+	return r.effectiveLocked()
+}
+
+// Resume 清除 reset 闩锁，按 host 下发的配置恢复同步循环。
+func (r *runtime) Resume() stickybind.Config {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.resetHalt = false
+	r.restartLocked()
+	return r.effectiveLocked()
 }
 
 func (r *runtime) restartLocked() {
@@ -106,14 +137,14 @@ func (r *runtime) restartLocked() {
 		r.stopCh = nil
 		r.doneCh = nil
 	}
-	if !r.cfg.Enabled {
+	cfg := r.effectiveLocked()
+	if !cfg.Enabled {
 		return
 	}
 	stop := make(chan struct{})
 	done := make(chan struct{})
 	r.stopCh = stop
 	r.doneCh = done
-	cfg := r.cfg
 	go r.loop(cfg, stop, done)
 }
 

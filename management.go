@@ -81,7 +81,7 @@ func handleManagement(raw []byte) ([]byte, error) {
 		return okEnvelope(htmlResponse(http.StatusNotFound, "<html><body>not found</body></html>"))
 	}
 
-	cfg := getRuntime().Config()
+	cfg, halted := getRuntime().State()
 	action := ""
 	if req.Query != nil {
 		action = strings.ToLower(strings.TrimSpace(req.Query.Get("action")))
@@ -96,17 +96,21 @@ func handleManagement(raw []byte) ([]byte, error) {
 			syncNote = fmt.Sprintf("sync done wrote=%d skipped=%d unchanged=%d failed=%d", wrote, skipped, unchanged, failed)
 		}
 	case "reset":
-		// 先停循环再清理，避免 reset 期间 tick 把 proxy_url 写回去
-		cfg = getRuntime().Disable()
+		// 先置位 reset 闩锁再清理：清理会写 auth 文件，host 的 auth watcher
+		// 随即下发 plugin.reconfigure，闩锁保证 enabled 不被拉回 true。
+		cfg, halted = getRuntime().HaltForReset(), true
 		cleared, skipped, failed, err := runManualReset(cfg)
 		if err != nil {
 			syncNote = "reset error: " + err.Error()
 		} else {
-			syncNote = fmt.Sprintf("reset done cleared=%d skipped=%d failed=%d; sync loop stopped (enabled=false)", cleared, skipped, failed)
+			syncNote = fmt.Sprintf("reset done cleared=%d skipped=%d failed=%d; sync loop halted until Resume", cleared, skipped, failed)
 		}
+	case "resume":
+		cfg, halted = getRuntime().Resume(), false
+		syncNote = fmt.Sprintf("resume done; sync loop follows config (enabled=%v)", cfg.Enabled)
 	}
 
-	page := renderStatusPage(cfg, syncNote)
+	page := renderStatusPage(cfg, halted, syncNote)
 	return okEnvelope(htmlResponse(http.StatusOK, page))
 }
 
@@ -145,7 +149,7 @@ func htmlResponse(status int, body string) managementResponse {
 	}
 }
 
-func renderStatusPage(cfg stickybind.Config, syncNote string) string {
+func renderStatusPage(cfg stickybind.Config, halted bool, syncNote string) string {
 	cfg = cfg.Normalize()
 	tokenStatus := "missing"
 	if _, err := stickybind.ParseResinProxyURL(cfg.ResinProxyURL, cfg.ProxyTokenEnv, os.Getenv); err == nil {
@@ -177,10 +181,14 @@ func renderStatusPage(cfg stickybind.Config, syncNote string) string {
 		b.WriteString("</div>")
 	}
 	b.WriteString("<p><a href=\"?action=sync\">Run sync now</a></p>")
-	b.WriteString("<p><a class=\"danger\" href=\"?action=reset\" onclick=\"return confirm('Clear plugin-managed proxy_url from all credentials and stop the sync loop?')\">Reset All</a></p>")
+	b.WriteString("<p><a class=\"danger\" href=\"?action=reset\" onclick=\"return confirm('Clear plugin-managed proxy_url from all credentials and halt the sync loop?')\">Reset All</a></p>")
+	if halted {
+		b.WriteString("<p><a href=\"?action=resume\">Resume sync loop</a></p>")
+	}
 	b.WriteString("<h2>Status</h2><table>")
 	row(&b, "plugin", pluginID+" v"+pluginVer)
 	row(&b, "enabled", fmt.Sprintf("%v", cfg.Enabled))
+	row(&b, "reset_halted", fmt.Sprintf("%v", halted))
 	row(&b, "resin_proxy_url", safeURL)
 	row(&b, "proxy_token_env", cfg.ProxyTokenEnv)
 	row(&b, "token_resolve", tokenStatus)
@@ -196,7 +204,9 @@ func renderStatusPage(cfg stickybind.Config, syncNote string) string {
 	b.WriteString("<li>Token may come from env, URL password, or URL username-only form.</li>")
 	b.WriteString("<li>Existing non-empty proxy_url is skipped when only_if_empty=true.</li>")
 	b.WriteString("<li>Reset All matches on scheme + Platform.Account + host:port, ignoring the token, so rotated tokens are still cleared; manual proxy_url values are kept.</li>")
-	b.WriteString("<li>Reset All also sets enabled=false to stop the sync loop. This is in-memory only: set enabled=false in the config file to make it stick across restarts and reconfigures.</li>")
+	b.WriteString("<li>Reset All covers disabled credentials and providers excluded by the current filters, so leftover bindings are cleared too.</li>")
+	b.WriteString("<li>Reset All latches the sync loop off. The latch outranks plugin.reconfigure, which the host fires on every auth file change &mdash; without it the loop would restart and rewrite proxy_url immediately.</li>")
+	b.WriteString("<li>The latch is in-memory only: it clears on Resume or process restart. Set enabled=false in the config file to make it stick.</li>")
 	b.WriteString("</ul></body></html>")
 	return b.String()
 }
