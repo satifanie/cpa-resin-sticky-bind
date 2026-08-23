@@ -1,4 +1,4 @@
-module github.com/ArchmageTony/cpa-resin-sticky-bind
+module github.com/satifanie/cpa-resin-sticky-bind
 
 go 1.26.0
 

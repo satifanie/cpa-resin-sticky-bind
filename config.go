@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/ArchmageTony/cpa-resin-sticky-bind/internal/stickybind"
+	"github.com/satifanie/cpa-resin-sticky-bind/internal/stickybind"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 

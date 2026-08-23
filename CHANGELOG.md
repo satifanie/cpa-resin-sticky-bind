@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.3
+
+- 仓库迁移至 `satifanie/cpa-resin-sticky-bind`: registry / 插件元数据 / 文档地址统一
+- go module path 更新为 `github.com/satifanie/cpa-resin-sticky-bind`
+- LICENSE 保留原作者版权并追加 fork 者
+
 ## 0.1.2
 
 - 修复状态页 404: 接受 host 传入的完整 resource 路径

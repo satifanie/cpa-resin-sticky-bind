@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ArchmageTony/cpa-resin-sticky-bind/internal/stickybind"
+	"github.com/satifanie/cpa-resin-sticky-bind/internal/stickybind"
 )
 
 const (
