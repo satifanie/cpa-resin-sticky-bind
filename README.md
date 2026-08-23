@@ -5,8 +5,9 @@ CLIProxyAPI 原生插件: 为每份凭证绑定稳定的 Resin sticky 代理 Acc
 | 项 | 值 |
 |----|----|
 | 插件 ID | `cpa-resin-sticky-bind` |
-| 版本 | `0.1.2` |
+| 版本 | `0.1.3` |
 | 协议 | MIT |
+| Fork 自 | [ArchmageTony/cpa-resin-sticky-bind](https://github.com/ArchmageTony/cpa-resin-sticky-bind) |
 
 ## 行为
 
@@ -28,7 +29,7 @@ plugins:
   enabled: true
   dir: "plugins"
   store-sources:
-    - "https://raw.githubusercontent.com/ArchmageTony/cpa-resin-sticky-bind/main/registry.json"
+    - "https://raw.githubusercontent.com/satifanie/cpa-resin-sticky-bind/main/registry.json"
   configs:
     cpa-resin-sticky-bind:
       enabled: true

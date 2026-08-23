@@ -2,7 +2,7 @@ plugins:
   enabled: true
   dir: "plugins"
   store-sources:
-    - "https://raw.githubusercontent.com/ArchmageTony/cpa-resin-sticky-bind/main/registry.json"
+    - "https://raw.githubusercontent.com/satifanie/cpa-resin-sticky-bind/main/registry.json"
   configs:
     cpa-resin-sticky-bind:
       enabled: true

@@ -17,6 +17,8 @@ vendor/
 # editor / os
 .idea/
 .vscode/
+.codegraph/
+.orca/
 .DS_Store
 *.swp
 *.log
