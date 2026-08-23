@@ -155,3 +155,158 @@ func TestSyncOnceSkipsRuntimeOnlyAndDisabled(t *testing.T) {
 		t.Fatalf("wrote=%d skipped=%d failed=%d", wrote, skipped, failed)
 	}
 }
+
+func TestResetOnceClearsPluginManagedProxy(t *testing.T) {
+	host := &mockHost{
+		entries: []HostAuthEntry{{
+			ID: "xai-a.json", AuthIndex: "idx1", Name: "xai-a.json", Provider: "xai", Email: "a@example.com",
+		}},
+		files: map[string]json.RawMessage{
+			"idx1": json.RawMessage(`{"type":"xai","email":"a@example.com","access_token":"t"}`),
+		},
+		names: map[string]string{"idx1": "xai-a.json"},
+	}
+	b := &Binder{Cfg: Defaults(), Host: host, Getenv: func(string) string { return "tok" }}
+	if wrote, _, _, _, err := b.SyncOnce(); err != nil || wrote != 1 {
+		t.Fatalf("setup sync wrote=%d err=%v", wrote, err)
+	}
+
+	cleared, skipped, failed, err := b.ResetOnce()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleared != 1 || skipped != 0 || failed != 0 {
+		t.Fatalf("cleared=%d skipped=%d failed=%d", cleared, skipped, failed)
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(host.saved["xai-a.json"], &meta); err != nil {
+		t.Fatal(err)
+	}
+	if proxy, _ := meta["proxy_url"].(string); proxy != "" {
+		t.Fatalf("proxy_url = %q, want empty", proxy)
+	}
+	if meta["access_token"] != "t" {
+		t.Fatalf("other fields lost: %#v", meta)
+	}
+}
+
+func TestResetOnceKeepsManualProxy(t *testing.T) {
+	host := &mockHost{
+		entries: []HostAuthEntry{{
+			ID: "xai-b.json", AuthIndex: "idx2", Name: "xai-b.json", Provider: "xai",
+		}},
+		files: map[string]json.RawMessage{
+			"idx2": json.RawMessage(`{"type":"xai","proxy_url":"socks5h://user:pass@other-host:1080"}`),
+		},
+		names: map[string]string{"idx2": "xai-b.json"},
+	}
+	b := &Binder{Cfg: Defaults(), Host: host, Getenv: func(string) string { return "tok" }}
+	cleared, skipped, failed, err := b.ResetOnce()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleared != 0 || skipped != 1 || failed != 0 {
+		t.Fatalf("cleared=%d skipped=%d failed=%d", cleared, skipped, failed)
+	}
+	if len(host.saved) != 0 {
+		t.Fatalf("unexpected save: %#v", host.saved)
+	}
+}
+
+func TestResetOnceSkipsEmptyProxy(t *testing.T) {
+	host := &mockHost{
+		entries: []HostAuthEntry{{
+			ID: "xai-c.json", AuthIndex: "idx3", Name: "xai-c.json", Provider: "xai",
+		}},
+		files: map[string]json.RawMessage{
+			"idx3": json.RawMessage(`{"type":"xai"}`),
+		},
+		names: map[string]string{"idx3": "xai-c.json"},
+	}
+	b := &Binder{Cfg: Defaults(), Host: host, Getenv: func(string) string { return "tok" }}
+	cleared, skipped, failed, err := b.ResetOnce()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleared != 0 || skipped != 1 || failed != 0 {
+		t.Fatalf("cleared=%d skipped=%d failed=%d", cleared, skipped, failed)
+	}
+}
+
+// token 轮换后已写入值的密码与当前配置不同，仍应能清除
+func TestResetOnceClearsAfterTokenRotation(t *testing.T) {
+	host := &mockHost{
+		entries: []HostAuthEntry{{
+			ID: "xai-e.json", AuthIndex: "idx5", Name: "xai-e.json", Provider: "xai",
+		}},
+		files: map[string]json.RawMessage{
+			"idx5": json.RawMessage(`{"type":"xai"}`),
+		},
+		names: map[string]string{"idx5": "xai-e.json"},
+	}
+	b := &Binder{Cfg: Defaults(), Host: host, Getenv: func(string) string { return "old-token" }}
+	if wrote, _, _, _, err := b.SyncOnce(); err != nil || wrote != 1 {
+		t.Fatalf("setup sync wrote=%d err=%v", wrote, err)
+	}
+
+	b.Getenv = func(string) string { return "new-token" }
+	cleared, skipped, failed, err := b.ResetOnce()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleared != 1 || skipped != 0 || failed != 0 {
+		t.Fatalf("cleared=%d skipped=%d failed=%d", cleared, skipped, failed)
+	}
+}
+
+// Platform.Account 不匹配的值属于其他来源，不能清除
+func TestResetOnceKeepsDifferentAccount(t *testing.T) {
+	host := &mockHost{
+		entries: []HostAuthEntry{{
+			ID: "xai-f.json", AuthIndex: "idx6", Name: "xai-f.json", Provider: "xai",
+		}},
+		files: map[string]json.RawMessage{
+			"idx6": json.RawMessage(`{"type":"xai","proxy_url":"socks5h://default.someone-else:tok@resin:2260"}`),
+		},
+		names: map[string]string{"idx6": "xai-f.json"},
+	}
+	b := &Binder{Cfg: Defaults(), Host: host, Getenv: func(string) string { return "tok" }}
+	cleared, skipped, failed, err := b.ResetOnce()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleared != 0 || skipped != 1 || failed != 0 {
+		t.Fatalf("cleared=%d skipped=%d failed=%d", cleared, skipped, failed)
+	}
+	if len(host.saved) != 0 {
+		t.Fatalf("unexpected save: %#v", host.saved)
+	}
+}
+
+// 禁用插件后仍需能清理已写入的绑定
+func TestResetOnceRunsWhenDisabled(t *testing.T) {
+	host := &mockHost{
+		entries: []HostAuthEntry{{
+			ID: "xai-d.json", AuthIndex: "idx4", Name: "xai-d.json", Provider: "xai",
+		}},
+		files: map[string]json.RawMessage{
+			"idx4": json.RawMessage(`{"type":"xai"}`),
+		},
+		names: map[string]string{"idx4": "xai-d.json"},
+	}
+	b := &Binder{Cfg: Defaults(), Host: host, Getenv: func(string) string { return "tok" }}
+	if wrote, _, _, _, err := b.SyncOnce(); err != nil || wrote != 1 {
+		t.Fatalf("setup sync wrote=%d err=%v", wrote, err)
+	}
+
+	cfg := Defaults()
+	cfg.Enabled = false
+	b.Cfg = cfg
+	cleared, _, failed, err := b.ResetOnce()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleared != 1 || failed != 0 {
+		t.Fatalf("cleared=%d failed=%d", cleared, failed)
+	}
+}

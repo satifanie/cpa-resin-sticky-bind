@@ -87,12 +87,22 @@ func handleManagement(raw []byte) ([]byte, error) {
 		action = strings.ToLower(strings.TrimSpace(req.Query.Get("action")))
 	}
 	var syncNote string
-	if action == "sync" {
+	switch action {
+	case "sync":
 		wrote, skipped, unchanged, failed, err := runManualSync(cfg)
 		if err != nil {
 			syncNote = "sync error: " + err.Error()
 		} else {
 			syncNote = fmt.Sprintf("sync done wrote=%d skipped=%d unchanged=%d failed=%d", wrote, skipped, unchanged, failed)
+		}
+	case "reset":
+		// 先停循环再清理，避免 reset 期间 tick 把 proxy_url 写回去
+		cfg = getRuntime().Disable()
+		cleared, skipped, failed, err := runManualReset(cfg)
+		if err != nil {
+			syncNote = "reset error: " + err.Error()
+		} else {
+			syncNote = fmt.Sprintf("reset done cleared=%d skipped=%d failed=%d; sync loop stopped (enabled=false)", cleared, skipped, failed)
 		}
 	}
 
@@ -110,12 +120,19 @@ func isStatusResourcePath(path string) bool {
 }
 
 func runManualSync(cfg stickybind.Config) (wrote, skipped, unchanged, failed int, err error) {
-	b := &stickybind.Binder{
+	return newBinder(cfg).SyncOnce()
+}
+
+func runManualReset(cfg stickybind.Config) (cleared, skipped, failed int, err error) {
+	return newBinder(cfg).ResetOnce()
+}
+
+func newBinder(cfg stickybind.Config) *stickybind.Binder {
+	return &stickybind.Binder{
 		Cfg:    cfg,
 		Host:   hostAdapter{},
 		Getenv: os.Getenv,
 	}
-	return b.SyncOnce()
 }
 
 func htmlResponse(status int, body string) managementResponse {
@@ -150,7 +167,7 @@ func renderStatusPage(cfg stickybind.Config, syncNote string) string {
 
 	var b strings.Builder
 	b.WriteString("<!doctype html><html><head><meta charset=\"utf-8\"><title>Resin Sticky Bind</title>")
-	b.WriteString("<style>body{font-family:system-ui,sans-serif;margin:24px;max-width:900px}code,pre{background:#f4f4f5;padding:2px 6px;border-radius:4px}table{border-collapse:collapse;width:100%}td,th{border:1px solid #ddd;padding:8px;text-align:left}.ok{color:#067d3e}.bad{color:#b00020}.note{margin:12px 0;padding:10px;background:#eef6ff;border-radius:6px}</style>")
+	b.WriteString("<style>body{font-family:system-ui,sans-serif;margin:24px;max-width:900px}code,pre{background:#f4f4f5;padding:2px 6px;border-radius:4px}table{border-collapse:collapse;width:100%}td,th{border:1px solid #ddd;padding:8px;text-align:left}.ok{color:#067d3e}.bad{color:#b00020}.note{margin:12px 0;padding:10px;background:#eef6ff;border-radius:6px}a.danger{color:#b00020}</style>")
 	b.WriteString("</head><body>")
 	b.WriteString("<h1>Resin Sticky Bind</h1>")
 	b.WriteString("<p>Binds empty credential <code>proxy_url</code> values to stable Resin sticky accounts.</p>")
@@ -160,6 +177,7 @@ func renderStatusPage(cfg stickybind.Config, syncNote string) string {
 		b.WriteString("</div>")
 	}
 	b.WriteString("<p><a href=\"?action=sync\">Run sync now</a></p>")
+	b.WriteString("<p><a class=\"danger\" href=\"?action=reset\" onclick=\"return confirm('Clear plugin-managed proxy_url from all credentials and stop the sync loop?')\">Reset All</a></p>")
 	b.WriteString("<h2>Status</h2><table>")
 	row(&b, "plugin", pluginID+" v"+pluginVer)
 	row(&b, "enabled", fmt.Sprintf("%v", cfg.Enabled))
@@ -177,6 +195,8 @@ func renderStatusPage(cfg stickybind.Config, syncNote string) string {
 	b.WriteString("<li>No Management API URL is required; host.auth callbacks run in-process.</li>")
 	b.WriteString("<li>Token may come from env, URL password, or URL username-only form.</li>")
 	b.WriteString("<li>Existing non-empty proxy_url is skipped when only_if_empty=true.</li>")
+	b.WriteString("<li>Reset All matches on scheme + Platform.Account + host:port, ignoring the token, so rotated tokens are still cleared; manual proxy_url values are kept.</li>")
+	b.WriteString("<li>Reset All also sets enabled=false to stop the sync loop. This is in-memory only: set enabled=false in the config file to make it stick across restarts and reconfigures.</li>")
 	b.WriteString("</ul></body></html>")
 	return b.String()
 }

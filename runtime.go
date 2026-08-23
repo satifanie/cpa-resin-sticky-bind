@@ -86,6 +86,17 @@ func (r *runtime) Config() stickybind.Config {
 	return r.cfg
 }
 
+// Disable 关闭 enabled 并停止同步循环，返回更新后的配置。
+// 仅作用于进程内状态：host 未提供写回插件配置的回调，
+// 下次 plugin.reconfigure 会按配置文件恢复 enabled。
+func (r *runtime) Disable() stickybind.Config {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.cfg.Enabled = false
+	r.restartLocked()
+	return r.cfg
+}
+
 func (r *runtime) restartLocked() {
 	if r.stopCh != nil {
 		close(r.stopCh)
@@ -135,12 +146,8 @@ func (r *runtime) loop(cfg stickybind.Config, stop <-chan struct{}, done chan<- 
 		case <-stop:
 			return
 		case <-ticker.C:
-			// pick latest config each tick
-			latest := r.Config()
-			if !latest.Enabled {
-				continue
-			}
-			b.Cfg = latest
+			// 不在此处回读 r.Config()：配置变更必经 ApplyConfig 重启 loop，
+			// 且回读会与持锁等待 goroutine 退出的 restartLocked 死锁。
 			run()
 		}
 	}
