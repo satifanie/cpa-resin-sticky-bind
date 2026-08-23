@@ -310,3 +310,91 @@ func TestResetOnceRunsWhenDisabled(t *testing.T) {
 		t.Fatalf("cleared=%d failed=%d", cleared, failed)
 	}
 }
+
+// 凭据在绑定后被禁用，reset 仍需清理其残留绑定
+func TestResetOnceClearsDisabledCredential(t *testing.T) {
+	host := &mockHost{
+		entries: []HostAuthEntry{{
+			ID: "xai-g.json", AuthIndex: "idx7", Name: "xai-g.json", Provider: "xai",
+		}},
+		files: map[string]json.RawMessage{
+			"idx7": json.RawMessage(`{"type":"xai"}`),
+		},
+		names: map[string]string{"idx7": "xai-g.json"},
+	}
+	b := &Binder{Cfg: Defaults(), Host: host, Getenv: func(string) string { return "tok" }}
+	if wrote, _, _, _, err := b.SyncOnce(); err != nil || wrote != 1 {
+		t.Fatalf("setup sync wrote=%d err=%v", wrote, err)
+	}
+
+	host.entries[0].Disabled = true
+	cleared, skipped, failed, err := b.ResetOnce()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleared != 1 || skipped != 0 || failed != 0 {
+		t.Fatalf("cleared=%d skipped=%d failed=%d", cleared, skipped, failed)
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(host.saved["xai-g.json"], &meta); err != nil {
+		t.Fatal(err)
+	}
+	if proxy, _ := meta["proxy_url"].(string); proxy != "" {
+		t.Fatalf("proxy_url = %q, want empty", proxy)
+	}
+}
+
+// provider 过滤改动后，先前绑定的凭据 reset 仍需清理
+func TestResetOnceClearsProviderFilteredCredential(t *testing.T) {
+	host := &mockHost{
+		entries: []HostAuthEntry{{
+			ID: "xai-h.json", AuthIndex: "idx8", Name: "xai-h.json", Provider: "xai",
+		}},
+		files: map[string]json.RawMessage{
+			"idx8": json.RawMessage(`{"type":"xai"}`),
+		},
+		names: map[string]string{"idx8": "xai-h.json"},
+	}
+	b := &Binder{Cfg: Defaults(), Host: host, Getenv: func(string) string { return "tok" }}
+	if wrote, _, _, _, err := b.SyncOnce(); err != nil || wrote != 1 {
+		t.Fatalf("setup sync wrote=%d err=%v", wrote, err)
+	}
+
+	cfg := Defaults()
+	cfg.ExcludeProviders = []string{"xai"}
+	b.Cfg = cfg
+	if wrote, skipped, _, _, err := b.SyncOnce(); err != nil || wrote != 0 || skipped != 1 {
+		t.Fatalf("sync should filter: wrote=%d skipped=%d err=%v", wrote, skipped, err)
+	}
+	cleared, skipped, failed, err := b.ResetOnce()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleared != 1 || skipped != 0 || failed != 0 {
+		t.Fatalf("cleared=%d skipped=%d failed=%d", cleared, skipped, failed)
+	}
+}
+
+// runtime_only 凭据无法通过 SaveAuth 持久化，reset 也必须跳过
+func TestResetOnceSkipsRuntimeOnly(t *testing.T) {
+	host := &mockHost{
+		entries: []HostAuthEntry{{
+			ID: "rt.json", AuthIndex: "idx9", Name: "rt.json", Provider: "xai", RuntimeOnly: true,
+		}},
+		files: map[string]json.RawMessage{
+			"idx9": json.RawMessage(`{"type":"xai","proxy_url":"socks5h://default.rt.json:tok@resin:2260"}`),
+		},
+		names: map[string]string{"idx9": "rt.json"},
+	}
+	b := &Binder{Cfg: Defaults(), Host: host, Getenv: func(string) string { return "tok" }}
+	cleared, skipped, failed, err := b.ResetOnce()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleared != 0 || skipped != 1 || failed != 0 {
+		t.Fatalf("cleared=%d skipped=%d failed=%d", cleared, skipped, failed)
+	}
+	if len(host.saved) != 0 {
+		t.Fatalf("unexpected save: %#v", host.saved)
+	}
+}
